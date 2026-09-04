@@ -372,6 +372,11 @@ def live_train_dict(data):
             # A real halt is stationary. Do not use route segment speed as current speed.
             speed = 0.0
             speed_source = "stationary"
+        elif segment_speed is not None:
+            # Last-resort display fallback: the provider's expected segment speed.
+            # This is NOT live telemetry, so the UI labels it as an estimate.
+            speed = segment_speed
+            speed_source = "segment_estimate"
         else:
             speed_source = "unavailable"
     else:
@@ -387,7 +392,7 @@ def live_train_dict(data):
         "delay": delay,
         "early_minutes": early_minutes,
         "speed": round(speed, 1) if speed is not None else None,
-        "speed_source": speed_source if speed is not None or segment_speed is not None else "unavailable",
+        "speed_source": speed_source if speed is not None else "unavailable",
         "segment_speed": round(segment_speed, 1) if segment_speed is not None else None,
         "status": status,
         "current_station": current_code or "—",

@@ -26,7 +26,8 @@ async function loadTrains(force=false){
   }
   let delayed=0,avg=0;
   trains.forEach(t=>{if(t.delay>=10)delayed++;avg+=Number(t.confidence||0);
-   tbody.innerHTML+=`<tr class="${selected===t.train_no?'selected-row':''}"><td><div class="train">${t.train_no} · ${t.name}</div><div class="route">${t.category||""} · ${t.zone||""}</div></td><td>${t.origin||"—"}<br>→ ${t.destination||"—"}</td><td>${badge(t.status)}</td><td><b>${t.speed!=null?t.speed:"—"}</b> ${t.speed!=null?"km/h":""}${t.speed_source==="progress_derived"?"*":""}</td><td><b>${(t.early_minutes||0)>0 ? `${t.early_minutes} min early` : `${t.delay ?? 0} min`}</b></td><td>${t.next_station||"—"}</td><td><b>${t.next_eta||"—"}</b></td><td>${t.confidence!=null?t.confidence+"%":"—"}</td><td><button class="view" onclick="selectTrain('${t.train_no}')">View</button></td></tr>`;
+   const speedCell=t.speed!=null?`${t.speed_source==="segment_estimate"?"~":""}${t.speed} km/h${t.speed_source==="progress_derived"?"*":""}`:"—";
+   tbody.innerHTML+=`<tr class="${selected===t.train_no?'selected-row':''}"><td><div class="train">${t.train_no} · ${t.name}</div><div class="route">${t.category||""} · ${t.zone||""}</div></td><td>${t.origin||"—"}<br>→ ${t.destination||"—"}</td><td>${badge(t.status)}</td><td><b title="${t.speed_source==="segment_estimate"?"Provider expected segment speed (not live telemetry)":t.speed_source==="progress_derived"?"Derived from live progress":"Live telemetry"}">${speedCell}</b></td><td><b>${(t.early_minutes||0)>0 ? `${t.early_minutes} min early` : `${t.delay ?? 0} min`}</b></td><td>${t.next_station||"—"}</td><td><b>${t.next_eta||"—"}</b></td><td>${t.confidence!=null?t.confidence+"%":"—"}</td><td><button class="view" onclick="selectTrain('${t.train_no}')">View</button></td></tr>`;
   });
   $("#stats").innerHTML=`<div class="stat"><label>TRAINS MONITORED</label><b>${trains.length}</b><small>${appMode==="LIVE"?"● live provider coverage":"● demo feed"}</small></div><div class="stat"><label>ON TIME / LOW DELAY</label><b>${trains.filter(x=>(x.delay||0)<10).length}</b><small>Dynamic status</small></div><div class="stat"><label>ACTIVE DELAYS</label><b>${delayed}</b><small>Needs attention</small></div><div class="stat"><label>AVG FORECAST CONF.</label><b>${trains.length?Math.round(avg/trains.length):0}%</b><small>${appMode==="LIVE"?"Live forecast input":"Model demo"}</small></div>`;
   $("#updated").textContent=(appMode==="LIVE"?"Live feed checked ":"Updated ")+new Date().toLocaleTimeString();
@@ -43,9 +44,9 @@ async function selectTrain(no){
   if(!stations) stations=`<div class="empty">No route forecast available.</div>`;
   let events=(ev||[]).length?ev.map(e=>`<div class="event"><b>${e.event_type||"EVENT"}${e.impact!=null?` · ${e.impact>0?"+":""}${e.impact} min`:""}</b><small>${e.message||""}<br>${e.created||""}</small></div>`).join(""):`<div class="empty">No recent events</div>`;
   const source=t.is_live?`Live source: ${t.data_source}`:"Demo source";
-  const speedLabel=t.speed_source==="progress_derived"?"Current speed (derived from live progress)":t.speed_source==="stationary"?"Current speed":"Current speed";
-  const speedValue=t.speed!=null?`${t.speed} km/h`:"Unavailable";
-  const speedNote=t.speed_source==="progress_derived"?"* Calculated from consecutive RailRadar segment-progress updates":t.segment_speed!=null?`Expected segment speed: ${t.segment_speed} km/h`:"";
+  const speedLabel=t.speed_source==="progress_derived"?"Current speed (derived)":t.speed_source==="segment_estimate"?"Speed estimate (provider segment)":"Current speed";
+  const speedValue=t.speed!=null?`${t.speed_source==="segment_estimate"?"~":""}${t.speed} km/h`:"Unavailable";
+  const speedNote=t.speed_source==="progress_derived"?"* Calculated from consecutive RailRadar segment-progress updates":t.speed_source==="segment_estimate"?"Provider expected segment speed; live telemetry unavailable":t.speed_source==="stationary"?"Train is at a station / halt":"";
   const w=env.weather||t.weather||{}; const pred=env.prediction||t.prediction||{}; const cong=env.congestion||t.congestion||{}; const sig=env.signal||t.signal||{};
   const weatherText=w.condition?`${w.condition} · ${w.temperature_c??"—"}°C · rain ${w.rain_mm??0} mm · wind ${w.wind_kmh??"—"} km/h`:(env.weather_error||"Weather unavailable");
   const predictedEta=t.predicted_eta||t.next_eta||"—";

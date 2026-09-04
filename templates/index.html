@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RailETA — Dynamic Train Intelligence</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header><div class="logo">Rail<span>ETA</span></div><div class="live"><i></i> LIVE NETWORK <b id="clock"></b></div></header>
+<div class="layout">
+<aside>
+<nav><a class="active">▦ Dashboard</a><a>◉ Live Trains</a><a>⌁ ETA Forecast</a><a>⚠ Delay Events</a><a>▤ Analytics</a></nav>
+<div class="sidebox"><b>API Status</b><p><span class="ok">●</span> Backend connected</p><p>SQLite database</p><p>Auto refresh: 10 sec</p></div>
+</aside>
+<main>
+<div class="hero"><div><h1>Dynamic Train ETA Control Center</h1><p>Real-time operational intelligence for coaching trains</p></div>
+<div class="search"><input id="search" placeholder="Search train no., name, origin..."><button onclick="loadTrains()">Search</button></div></div>
+<section class="stats" id="stats"></section>
+<div class="content">
+<section class="panel"><div class="head"><h2>All Trains</h2><span id="updated">Updating...</span></div><div class="tablewrap"><table><thead><tr><th>TRAIN</th><th>ROUTE</th><th>STATUS</th><th>SPEED</th><th>DELAY</th><th>NEXT STATION</th><th>ETA</th><th>CONF.</th><th></th></tr></thead><tbody id="trains"></tbody></table></div></section>
+<section class="panel detail"><div class="head"><h2 id="detailTitle">Select a train</h2><span class="badge blue" id="detailStatus">—</span></div><div id="detailBody"><div class="empty">Click <b>View</b> on any train to inspect its live ETA.</div></div></section>
+</div>
+</main></div>
+<script src="/static/app.js"></script>
+</body></html>

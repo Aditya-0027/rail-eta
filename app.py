@@ -162,6 +162,31 @@ def live_train_dict(data):
     lon = current_route.get("lng")
     if lat is None: lat = next_route.get("lat")
     if lon is None: lon = next_route.get("lng")
+    # Prefer provider telemetry for current speed. Some provider responses can omit
+    # speed or use a slightly different telemetry shape; do not collapse a missing
+    # value into 0 km/h. A real 0 is preserved (e.g. while halted).
+    telemetry = cur.get("telemetry") if isinstance(cur.get("telemetry"), dict) else {}
+    raw_speed = cur.get("speedKmh")
+    speed_source = "telemetry"
+    if raw_speed is None:
+        raw_speed = cur.get("speed")
+    if raw_speed is None:
+        raw_speed = telemetry.get("speedKmh", telemetry.get("speed"))
+    try:
+        speed = float(raw_speed) if raw_speed is not None and str(raw_speed).strip() != "" else None
+    except (TypeError, ValueError):
+        speed = None
+    # If no current telemetry speed is supplied, expose the provider's route
+    # segment speed separately rather than pretending it is current speed.
+    segment_speed = next_route.get("speedToNextStationKmph")
+    if speed is None and segment_speed is not None:
+        try:
+            segment_speed = float(segment_speed)
+            speed_source = "segment_estimate"
+        except (TypeError, ValueError):
+            segment_speed = None
+    else:
+        segment_speed = None
     confidence = max(70, min(98, round(96 - min(delay,30)*0.55)))
     return {
         "train_no": str(train.get("number") or data.get("trainNumber") or ""),
@@ -172,7 +197,9 @@ def live_train_dict(data):
         "zone": "LIVE",
         "delay": delay,
         "early_minutes": early_minutes,
-        "speed": round(float(cur.get("speedKmh") or 0), 1),
+        "speed": round(speed, 1) if speed is not None else None,
+        "speed_source": speed_source if speed is not None or segment_speed is not None else "unavailable",
+        "segment_speed": round(segment_speed, 1) if segment_speed is not None else None,
         "status": status,
         "current_station": current_code or "—",
         "next_station": nxt.get("stationName") or next_code or "—",

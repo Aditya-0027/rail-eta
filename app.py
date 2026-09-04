@@ -8,6 +8,11 @@ try:
 except ImportError:  # pragma: no cover
     requests = None
 
+try:
+    import joblib
+except ImportError:  # pragma: no cover
+    joblib = None
+
 app = Flask(__name__)
 CORS(app)
 DB = "rail_eta.db"
@@ -18,15 +23,23 @@ DEFAULT_LIVE_NUMBERS = "12919,12952,12002,12259,12301,12424,12431,12622,12627,12
 LIVE_NUMBERS = [x.strip() for x in os.getenv("LIVE_TRAIN_NUMBERS", DEFAULT_LIVE_NUMBERS).split(",") if x.strip()]
 LIVE_CACHE_SECONDS = int(os.getenv("LIVE_CACHE_SECONDS", "300"))  # 5 min cache; 100 trains can consume a large API quota quickly
 _live_cache = {}
+# Previous live snapshots used to derive speed when RailRadar does not supply speedKmh.
+_speed_history = {}
 _live_lock = threading.Lock()
 _weather_cache = {}
 _weather_lock = threading.Lock()
 WEATHER_CACHE_SECONDS = int(os.getenv("WEATHER_CACHE_SECONDS", "900"))  # 15 min
 WEATHER_BASE = "https://api.open-meteo.com/v1/forecast"
-GEOCODE_BASE = "https://geocoding-api.open-meteo.com/v1/search"
-_station_geo_cache = {}
-_station_geo_lock = threading.Lock()
-STATION_GEO_CACHE_SECONDS = 86400  # 24h; station coordinates change very rarely
+MODEL_PATH = os.getenv("ETA_MODEL_PATH", "model/eta_delay_model.joblib")
+ETA_MODEL = None
+ETA_MODEL_FEATURES = []
+if joblib and os.path.exists(MODEL_PATH):
+    try:
+        bundle = joblib.load(MODEL_PATH)
+        ETA_MODEL = bundle.get("model") if isinstance(bundle, dict) else bundle
+        ETA_MODEL_FEATURES = bundle.get("features", []) if isinstance(bundle, dict) else []
+    except Exception:
+        ETA_MODEL = None
 
 SEED_TRAINS = [
     ("12951","Mumbai Rajdhani","Mumbai Central","New Delhi","Rajdhani Express","WR",8),
@@ -130,7 +143,7 @@ def fetch_live(train_no, force=False):
         r = requests.get(
             f"{RAILRADAR_BASE}/trains/{train_no}/live",
             headers={"Authorization": f"Bearer {RAILRADAR_API_KEY}"},
-            params={"authoritative":"true"}, timeout=12
+            params={"authoritative":"true" if force else "false"}, timeout=12
         )
         if r.status_code != 200:
             return None, f"RailRadar HTTP {r.status_code}"
@@ -145,40 +158,8 @@ def fetch_live(train_no, force=False):
         return None, str(e)
 
 
-def geocode_station(station_name, force=False):
-    """Resolve a station name to approximate coordinates once, then cache for 24h."""
-    if not station_name or requests is None:
-        return None, "Station name unavailable"
-    name = str(station_name).strip()
-    if not name or name in ("—", "Not supplied"):
-        return None, "Station name unavailable"
-    key = name.lower()
-    now = datetime.now()
-    with _station_geo_lock:
-        cached = _station_geo_cache.get(key)
-        if cached and not force and (now - cached["fetched"]).total_seconds() < STATION_GEO_CACHE_SECONDS:
-            return cached["data"], None
-    try:
-        r = requests.get(GEOCODE_BASE, params={"name": name, "count": 5, "language": "en", "format": "json"}, timeout=8)
-        if r.status_code != 200:
-            return None, f"Geocoding HTTP {r.status_code}"
-        results = r.json().get("results") or []
-        # Prefer an India result. Open-Meteo geocoding may return a city with the same name.
-        chosen = next((x for x in results if str(x.get("country_code", "")).upper() == "IN"), results[0] if results else None)
-        if not chosen:
-            return None, "Station coordinates not found"
-        out = {"lat": chosen.get("latitude"), "lon": chosen.get("longitude"), "name": chosen.get("name") or name}
-        with _station_geo_lock:
-            _station_geo_cache[key] = {"fetched": now, "data": out}
-        return out, None
-    except Exception as e:
-        return None, str(e)
-
-
 def fetch_weather(lat, lon, force=False):
-    if requests is None:
-        return None, "Weather client unavailable"
-    if lat is None or lon is None:
+    if lat is None or lon is None or requests is None:
         return None, "Weather coordinates unavailable"
     try:
         latf, lonf = float(lat), float(lon)
@@ -235,13 +216,45 @@ def prediction_features(train, weather=None):
     rain=float((weather or {}).get("rain_mm") or 0)
     wind=float((weather or {}).get("wind_kmh") or 0)
     visibility=float((weather or {}).get("visibility_m") or 10000)
-    weather_penalty=min(12, rain*0.8 + max(0, wind-35)*0.08 + max(0, 3000-visibility)/1000*1.5)
     congestion=compute_congestion(delay, train.get("status"))
+    weather_penalty=min(12, rain*0.8 + max(0, wind-35)*0.08 + max(0, 3000-visibility)/1000*1.5)
     congestion_penalty=congestion["score"]*0.05
-    # Transparent prototype prediction layer; replace with trained model later.
-    predicted_extra=max(0, round(delay*0.35 + weather_penalty + congestion_penalty - max(0,speed-70)*0.03))
+
+    # If a trained historical model has been installed, use it for delay risk.
+    ml_probability = None
+    model_name = "rule-based prototype"
+    if ETA_MODEL is not None and hasattr(ETA_MODEL, "predict_proba"):
+        try:
+            # Model features are deliberately small and available from the live feed.
+            vals = {
+                "current_delay": delay,
+                "current_speed": speed,
+                "rain_mm": rain,
+                "wind_kmh": wind,
+                "visibility_m": visibility,
+                "congestion_score": congestion["score"],
+            }
+            import pandas as pd
+            X = pd.DataFrame([{f: vals.get(f, 0) for f in ETA_MODEL_FEATURES}])
+            ml_probability = float(ETA_MODEL.predict_proba(X)[0][1])
+            model_name = "trained historical-delay ML model"
+        except Exception:
+            ml_probability = None
+
+    # Transparent ETA adjustment. ML probability modifies the expected extra delay;
+    # it does not pretend the historical classifier predicts an exact minute value.
+    risk_extra = round((ml_probability or 0) * 8) if ml_probability is not None else 0
+    predicted_extra=max(0, round(delay*0.35 + weather_penalty + congestion_penalty + risk_extra - max(0,speed-70)*0.03))
     confidence=max(60,min(96,round(94 - weather_penalty*1.2 - congestion_penalty*0.5)))
-    return {"predicted_extra_delay":predicted_extra,"confidence":confidence,"weather_penalty_min":round(weather_penalty,1),"congestion_penalty_min":round(congestion_penalty,1),"model":"prototype predictive model"}
+    return {
+        "predicted_extra_delay":predicted_extra,
+        "confidence":confidence,
+        "weather_penalty_min":round(weather_penalty,1),
+        "congestion_penalty_min":round(congestion_penalty,1),
+        "delay_risk_probability":round(ml_probability,3) if ml_probability is not None else None,
+        "model":model_name,
+        "model_available":bool(ETA_MODEL is not None),
+    }
 
 def live_train_dict(data):
     train = data.get("train") or {}
@@ -257,7 +270,9 @@ def live_train_dict(data):
     delay = max(0, raw_delay)
     early_minutes = abs(raw_delay) if raw_delay < 0 else 0
     status_raw = str(data.get("status") or "unknown").lower()
-    status = "AT STATION" if cur.get("isHalt") else ("DELAYED" if delay >= 10 else "RUNNING")
+    current_status_raw = str(cur.get("status") or "").lower().replace("_", "-").strip()
+    at_station = current_status_raw in ("at-station", "halted", "at station") or (bool(cur.get("isHalt")) and current_status_raw not in ("departed", "running", "enroute", "in-transit"))
+    status = "AT STATION" if at_station else ("DELAYED" if delay >= 10 else "RUNNING")
     if status_raw in ("cancelled", "canceled"):
         status = "CANCELLED"
     scheduled = next_route.get("scheduledArrival") or next_route.get("scheduledDeparture")
@@ -268,33 +283,98 @@ def live_train_dict(data):
     lon = current_route.get("lng")
     if lat is None: lat = next_route.get("lat")
     if lon is None: lon = next_route.get("lng")
-    # Current speed must represent the train's actual present movement. If the
-    # provider marks the train as halted at a station, never display a route
-    # segment-speed estimate as the current speed. A halted train is 0 km/h.
+    # Prefer provider telemetry for current speed. Some provider responses can omit
+    # speed or use a slightly different telemetry shape; do not collapse a missing
+    # value into 0 km/h. A real 0 is preserved (e.g. while halted).
     telemetry = cur.get("telemetry") if isinstance(cur.get("telemetry"), dict) else {}
     raw_speed = cur.get("speedKmh")
+    speed_source = "telemetry"
     if raw_speed is None:
         raw_speed = cur.get("speed")
     if raw_speed is None:
         raw_speed = telemetry.get("speedKmh", telemetry.get("speed"))
     try:
-        telemetry_speed = float(raw_speed) if raw_speed is not None and str(raw_speed).strip() != "" else None
+        speed = float(raw_speed) if raw_speed is not None and str(raw_speed).strip() != "" else None
     except (TypeError, ValueError):
-        telemetry_speed = None
-
-    halted_at_station = bool(cur.get("isHalt")) or status == "AT STATION"
-    if halted_at_station:
-        speed = 0.0
-        speed_source = "stationary"
-    else:
-        speed = telemetry_speed
-        speed_source = "telemetry" if speed is not None else "unavailable"
-
-    # Route segment speed is an estimate for the section ahead, NOT current speed.
+        speed = None
+    # If RailRadar does not provide speedKmh, derive speed from consecutive
+    # live segmentProgress snapshots. RailRadar documents segmentProgress as a
+    # 0..1 progress value on the current segment. This is a derived live
+    # estimate, not a fake replacement for provider telemetry.
     segment_speed = next_route.get("speedToNextStationKmph")
-    try:
-        segment_speed = float(segment_speed) if segment_speed is not None else None
-    except (TypeError, ValueError):
+    if speed is None:
+        try:
+            segment_speed = float(segment_speed) if segment_speed is not None else None
+        except (TypeError, ValueError):
+            segment_speed = None
+
+        progress = cur.get("segmentProgress")
+        updated_raw = data.get("lastUpdatedAt")
+        current_seq = cur.get("sequence")
+        derived_speed = None
+        if progress is not None and updated_raw is not None and current_seq is not None:
+            try:
+                progress = float(progress)
+                current_seq = int(current_seq)
+                updated_dt = datetime.fromisoformat(str(updated_raw).replace("Z", "+00:00"))
+                history_key = str(train.get("number") or data.get("trainNumber") or "")
+                prev = _speed_history.get(history_key)
+
+                # Determine the physical distance of the current route segment.
+                route_idx = next((i for i, x in enumerate(route) if int(x.get("sequence", -1)) == current_seq), None)
+                if route_idx is not None and route_idx + 1 < len(route):
+                    start_stop = route[route_idx]
+                    end_stop = route[route_idx + 1]
+                    d1 = float(start_stop.get("distance")) if start_stop.get("distance") is not None else None
+                    d2 = float(end_stop.get("distance")) if end_stop.get("distance") is not None else None
+                    segment_km = (d2 - d1) if d1 is not None and d2 is not None else None
+
+                    if segment_km is not None and segment_km > 0:
+                        # First-choice fallback: estimate average speed since the
+                        # actual departure from the segment's starting station.
+                        # This can work on the very first API snapshot when the
+                        # provider includes actualDeparture + segmentProgress.
+                        actual_departure = start_stop.get("actualDeparture")
+                        if actual_departure:
+                            try:
+                                dep_dt = datetime.fromisoformat(str(actual_departure).replace("Z", "+00:00"))
+                                elapsed_hours = (updated_dt - dep_dt).total_seconds() / 3600.0
+                                travelled_km = segment_km * max(0.0, min(1.0, progress))
+                                if 0.02 <= elapsed_hours <= 4 and travelled_km >= 0:
+                                    candidate = travelled_km / elapsed_hours
+                                    if 1 <= candidate <= 160:
+                                        derived_speed = candidate
+                            except (TypeError, ValueError, OverflowError):
+                                pass
+
+                        if prev and prev.get("sequence") == current_seq and derived_speed is None:
+                            dt_hours = (updated_dt - prev["updated_dt"]).total_seconds() / 3600.0
+                            dp = progress - float(prev.get("progress", 0.0))
+                            distance_km = segment_km * dp
+                            if 0.0001 < dt_hours <= 2 and distance_km >= 0:
+                                candidate = distance_km / dt_hours
+                                # Reject obviously bad jumps caused by stale/reset feeds.
+                                if 1 <= candidate <= 180:
+                                    derived_speed = candidate
+
+                        _speed_history[history_key] = {
+                            "sequence": current_seq,
+                            "progress": progress,
+                            "updated_dt": updated_dt,
+                        }
+            except (TypeError, ValueError, OverflowError):
+                derived_speed = None
+
+        if derived_speed is not None:
+            speed = derived_speed
+            speed_source = "progress_derived"
+        elif at_station:
+            # A real halt is stationary. Do not use route segment speed as current speed.
+            speed = 0.0
+            speed_source = "stationary"
+        else:
+            speed_source = "unavailable"
+    else:
         segment_speed = None
     confidence = max(70, min(98, round(96 - min(delay,30)*0.55)))
     base = {
@@ -325,27 +405,11 @@ def live_train_dict(data):
     }
     weather = None
     weather_error = None
-    weather_source = "train coordinates"
-    weather_station = None
     if lat is not None and lon is not None:
         weather, weather_error = fetch_weather(lat, lon)
-    # If the live provider does not supply GPS coordinates, use the next station
-    # as a location fallback. This keeps weather live without pretending the
-    # station coordinates are the train's exact position. Geocoding is cached 24h.
-    if weather is None:
-        fallback_station = nxt.get("stationName") or next_code or current_code
-        coords, geo_error = geocode_station(fallback_station)
-        if coords and coords.get("lat") is not None and coords.get("lon") is not None:
-            weather, weather_error = fetch_weather(coords["lat"], coords["lon"])
-            weather_source = "next-station coordinates"
-            weather_station = coords.get("name") or fallback_station
-        elif not weather_error:
-            weather_error = geo_error or "Weather coordinates unavailable"
     prediction = prediction_features(base, weather)
     base["weather"] = weather
     base["weather_error"] = weather_error
-    base["weather_source"] = weather_source
-    base["weather_station"] = weather_station
     base["congestion"] = compute_congestion(base.get("delay"), base.get("status"), base.get("next_station"))
     base["signal"] = {"status":"NOT SUPPLIED", "source":"RailRadar live feed does not provide railway signal aspect in this response"}
     base["prediction"] = prediction
@@ -369,7 +433,7 @@ def health():
     return jsonify({"ok":True,"service":"RailETA API","time":datetime.now().isoformat(),
                     "data_mode":"LIVE" if live_enabled() else "DEMO",
                     "live_provider":"RailRadar" if live_enabled() else None,
-                    "live_trains":LIVE_NUMBERS if live_enabled() else []})
+                    "live_trains":LIVE_NUMBERS if live_enabled() else [], "ml_model_loaded": bool(ETA_MODEL is not None)})
 
 @app.route("/api/config")
 def config():
@@ -379,6 +443,7 @@ def config():
         "live_trains": LIVE_NUMBERS if live_enabled() else [],
         "refresh_seconds": LIVE_CACHE_SECONDS if live_enabled() else 10,
         "weather_cache_seconds": WEATHER_CACHE_SECONDS,
+        "ml_model_loaded": bool(ETA_MODEL is not None),
         "message": "Live railway feed connected" if live_enabled() else "Add RAILRADAR_API_KEY in Render to enable live data"
     })
 

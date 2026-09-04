@@ -5,3 +5,4 @@
 tr.selected-row td { background: #eef5ff; }
 tr.selected-row td:first-child { box-shadow: inset 3px 0 0 #2f6fed; }
 .view { cursor: pointer; }
+.mode{font-weight:700}.live-mode{color:#86efac}.demo-mode{color:#fbbf24}

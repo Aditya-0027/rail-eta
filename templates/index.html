@@ -6,11 +6,11 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header><div class="logo">Rail<span>ETA</span></div><div class="live"><i></i> LIVE NETWORK <b id="clock"></b></div></header>
+<header><div class="logo">Rail<span>ETA</span></div><div class="live"><i></i> <span id="modeLabel">CONNECTING...</span> <b id="clock"></b></div></header>
 <div class="layout">
 <aside>
 <nav><a class="active">▦ Dashboard</a><a>◉ Live Trains</a><a>⌁ ETA Forecast</a><a>⚠ Delay Events</a><a>▤ Analytics</a></nav>
-<div class="sidebox"><b>API Status</b><p><span class="ok">●</span> Backend connected</p><p>SQLite database</p><p>Auto refresh: 10 sec</p></div>
+<div class="sidebox"><b>API Status</b><p><span class="ok">●</span> Backend connected</p><p>Provider: <b id="providerLabel">Loading...</b></p><p id="refreshLabel">Checking data source...</p></div>
 </aside>
 <main>
 <div class="hero"><div><h1>Dynamic Train ETA Control Center</h1><p>Real-time operational intelligence for coaching trains</p></div>

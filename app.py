@@ -14,7 +14,8 @@ DB = "rail_eta.db"
 
 RAILRADAR_BASE = "https://api.railradar.in/v1"
 RAILRADAR_API_KEY = os.getenv("RAILRADAR_API_KEY", "").strip()
-LIVE_NUMBERS = [x.strip() for x in os.getenv("LIVE_TRAIN_NUMBERS", "12919,12952,12002").split(",") if x.strip()]
+DEFAULT_LIVE_NUMBERS = "12919,12952,12002,12259,12301,12424,12431,12622,12627,12910"
+LIVE_NUMBERS = [x.strip() for x in os.getenv("LIVE_TRAIN_NUMBERS", DEFAULT_LIVE_NUMBERS).split(",") if x.strip()]
 LIVE_CACHE_SECONDS = int(os.getenv("LIVE_CACHE_SECONDS", "300"))  # 5 min: keeps free sandbox usage manageable
 _live_cache = {}
 _live_lock = threading.Lock()
@@ -145,7 +146,10 @@ def live_train_dict(data):
     current_route = next((x for x in route if x.get("stationCode") == current_code), {})
     next_code = nxt.get("stationCode")
     next_route = next((x for x in route if x.get("stationCode") == next_code), {})
-    delay = int(data.get("delayMinutes") or 0)
+    raw_delay = int(data.get("delayMinutes") or 0)
+    # Keep the API value, but prevent a negative "delay" from being treated as an active delay.
+    delay = max(0, raw_delay)
+    early_minutes = abs(raw_delay) if raw_delay < 0 else 0
     status_raw = str(data.get("status") or "unknown").lower()
     status = "AT STATION" if cur.get("isHalt") else ("DELAYED" if delay >= 10 else "RUNNING")
     if status_raw in ("cancelled", "canceled"):
@@ -167,6 +171,7 @@ def live_train_dict(data):
         "category": train.get("category") or train.get("type") or "Indian Railways",
         "zone": "LIVE",
         "delay": delay,
+        "early_minutes": early_minutes,
         "speed": round(float(cur.get("speedKmh") or 0), 1),
         "status": status,
         "current_station": current_code or "—",
@@ -213,19 +218,36 @@ def config():
 
 
 def get_all_trains(q="", force=False):
-    # With a live key, show only configured live trains. This avoids falsely labelling demo rows as real.
+    # Live mode: configured trains populate the dashboard. A numeric search can also
+    # fetch ANY train on-demand, so the UI is not limited to LIVE_TRAIN_NUMBERS.
     if live_enabled():
         out=[]
         errors=[]
+        q_clean=q.lower().strip()
         for no in LIVE_NUMBERS:
             d, err = get_live_train(no, force=force)
             if d:
                 out.append(d)
             else:
                 errors.append({"train_no":no,"error":err})
-        q=q.lower().strip()
-        if q:
-            out=[t for t in out if q in str(t.get("train_no","")).lower() or q in str(t.get("name","")).lower() or q in str(t.get("origin","")).lower() or q in str(t.get("destination","")).lower()]
+
+        if q_clean:
+            filtered=[t for t in out if q_clean in str(t.get("train_no","")).lower()
+                      or q_clean in str(t.get("name","")).lower()
+                      or q_clean in str(t.get("origin","")).lower()
+                      or q_clean in str(t.get("destination","")).lower()]
+            if filtered:
+                return filtered, errors
+
+            # On-demand lookup: a train number not in the configured dashboard list.
+            # This lets the search box scale beyond the curated list without storing
+            # every Indian train number in an environment variable.
+            if q_clean.isdigit() and 4 <= len(q_clean) <= 6:
+                d, err = get_live_train(q_clean, force=force)
+                if d:
+                    return [d], errors
+                errors.append({"train_no":q_clean,"error":err or "Train not found or live data unavailable"})
+            return [], errors
         return out, errors
     c=conn()
     if q:
@@ -245,7 +267,9 @@ def trains():
 
 @app.route("/api/trains/<train_no>")
 def train(train_no):
-    if live_enabled() and train_no in LIVE_NUMBERS:
+    if live_enabled():
+        if not train_no.isdigit() or not (4 <= len(train_no) <= 6):
+            return jsonify({"error":"Enter a valid train number","train_no":train_no}),400
         d, err=get_live_train(train_no)
         if d: return jsonify(d)
         return jsonify({"error":err or "Live train unavailable","train_no":train_no}),503
@@ -256,7 +280,7 @@ def train(train_no):
 
 @app.route("/api/trains/<train_no>/stations")
 def station_list(train_no):
-    if live_enabled() and train_no in LIVE_NUMBERS:
+    if live_enabled():
         d, err=fetch_live(train_no)
         if not d: return jsonify({"error":err or "Live route unavailable"}),503
         out=[]
@@ -280,7 +304,7 @@ def station_list(train_no):
 
 @app.route("/api/trains/<train_no>/events")
 def events(train_no):
-    if live_enabled() and train_no in LIVE_NUMBERS:
+    if live_enabled():
         d, err=fetch_live(train_no)
         if not d: return jsonify([])
         return jsonify([{"event_type":"LIVE FEED","impact":int(d.get("delayMinutes") or 0),
@@ -308,7 +332,7 @@ def live_tick():
 
 @app.route("/api/trains/<train_no>/simulate", methods=["POST"])
 def simulate(train_no):
-    if live_enabled() and train_no in LIVE_NUMBERS:
+    if live_enabled():
         d, err=get_live_train(train_no, force=True)
         if d: return jsonify(d)
         return jsonify({"error":err or "Live provider unavailable"}),503

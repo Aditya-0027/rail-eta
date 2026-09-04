@@ -6,3 +6,5 @@ tr.selected-row td { background: #eef5ff; }
 tr.selected-row td:first-child { box-shadow: inset 3px 0 0 #2f6fed; }
 .view { cursor: pointer; }
 .mode{font-weight:700}.live-mode{color:#86efac}.demo-mode{color:#fbbf24}
+
+.environment{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0}.environment>div{background:#f8fafc;border:1px solid var(--line);padding:10px;border-radius:8px}.environment b{display:block;font-size:10px}.environment span{display:block;color:var(--muted);font-size:9px;margin-top:4px;line-height:1.4}@media(max-width:600px){.environment{grid-template-columns:1fr}}

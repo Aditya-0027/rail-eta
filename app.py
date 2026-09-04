@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
-import os, random, sqlite3, threading
+import os, random, sqlite3, threading, math
 from datetime import datetime, timedelta
 
 try:
@@ -14,11 +14,15 @@ DB = "rail_eta.db"
 
 RAILRADAR_BASE = "https://api.railradar.in/v1"
 RAILRADAR_API_KEY = os.getenv("RAILRADAR_API_KEY", "").strip()
-DEFAULT_LIVE_NUMBERS = "12919,12952,12002,12259,12301,12424,12431,12622,12627,12910"
+DEFAULT_LIVE_NUMBERS = "12919,12952,12002,12259,12301,12424,12431,12622,12627,12910,12951,12432,12433,12434,12453,12454,12302,12313,12314,12309,12310,12903,12904,12905,12906,12907,12908,12909,12911,12912,12925,12926,12927,12928,12931,12932,12933,12934,12935,12936,12937,12938,12939,12940,12941,12942,12943,12944,12945,12946,12001,12003,12004,12005,12006,12007,12008,12009,12010,12011,12012,12013,12014,12015,12016,12017,12018,12023,12024,12029,12030,12031,12032,12033,12034,12039,12040,12045,12046,12127,12128,12129,12130,12131,12132,12133,12134,12269,12270,12271,12272,12273,12274,12281,12282,12283,12284,12285,12286,12621"
 LIVE_NUMBERS = [x.strip() for x in os.getenv("LIVE_TRAIN_NUMBERS", DEFAULT_LIVE_NUMBERS).split(",") if x.strip()]
-LIVE_CACHE_SECONDS = int(os.getenv("LIVE_CACHE_SECONDS", "300"))  # 5 min: keeps free sandbox usage manageable
+LIVE_CACHE_SECONDS = int(os.getenv("LIVE_CACHE_SECONDS", "300"))  # 5 min cache; 100 trains can consume a large API quota quickly
 _live_cache = {}
 _live_lock = threading.Lock()
+_weather_cache = {}
+_weather_lock = threading.Lock()
+WEATHER_CACHE_SECONDS = int(os.getenv("WEATHER_CACHE_SECONDS", "900"))  # 15 min
+WEATHER_BASE = "https://api.open-meteo.com/v1/forecast"
 
 SEED_TRAINS = [
     ("12951","Mumbai Rajdhani","Mumbai Central","New Delhi","Rajdhani Express","WR",8),
@@ -137,6 +141,72 @@ def fetch_live(train_no, force=False):
         return None, str(e)
 
 
+def fetch_weather(lat, lon, force=False):
+    if lat is None or lon is None or requests is None:
+        return None, "Weather coordinates unavailable"
+    try:
+        latf, lonf = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return None, "Invalid weather coordinates"
+    key = (round(latf, 2), round(lonf, 2))
+    now = datetime.now()
+    with _weather_lock:
+        cached = _weather_cache.get(key)
+        if cached and not force and (now - cached["fetched"]).total_seconds() < WEATHER_CACHE_SECONDS:
+            return cached["data"], None
+    try:
+        params = {
+            "latitude": latf, "longitude": lonf,
+            "current": "temperature_2m,relative_humidity_2m,precipitation,rain,weather_code,wind_speed_10m,visibility",
+            "timezone": "Asia/Kolkata"
+        }
+        r = requests.get(WEATHER_BASE, params=params, timeout=8)
+        if r.status_code != 200:
+            return None, f"Weather HTTP {r.status_code}"
+        payload = r.json()
+        cur = payload.get("current") or {}
+        code = cur.get("weather_code")
+        labels = {0:"Clear",1:"Mainly clear",2:"Partly cloudy",3:"Overcast",45:"Fog",48:"Rime fog",51:"Light drizzle",53:"Drizzle",55:"Heavy drizzle",61:"Light rain",63:"Rain",65:"Heavy rain",71:"Light snow",73:"Snow",75:"Heavy snow",80:"Rain showers",81:"Rain showers",82:"Heavy showers",95:"Thunderstorm",96:"Thunderstorm",99:"Thunderstorm"}
+        out={
+            "temperature_c": cur.get("temperature_2m"),
+            "humidity_pct": cur.get("relative_humidity_2m"),
+            "precipitation_mm": cur.get("precipitation"),
+            "rain_mm": cur.get("rain"),
+            "wind_kmh": cur.get("wind_speed_10m"),
+            "visibility_m": cur.get("visibility"),
+            "weather_code": code,
+            "condition": labels.get(code, "Unknown"),
+            "updated": cur.get("time")
+        }
+        with _weather_lock:
+            _weather_cache[key] = {"fetched": now, "data": out}
+        return out, None
+    except Exception as e:
+        return None, str(e)
+
+def compute_congestion(delay, status, next_station=None):
+    d=max(0,float(delay or 0))
+    if str(status).upper()=="AT STATION": score=45+d*0.6
+    else: score=d*1.8
+    score=max(0,min(100,round(score)))
+    level="LOW" if score<25 else "MEDIUM" if score<60 else "HIGH"
+    return {"score":score,"level":level,"source":"derived from live delay/status; no track-occupancy feed"}
+
+def prediction_features(train, weather=None):
+    delay=float(train.get("delay") or 0)
+    speed=train.get("speed")
+    speed=float(speed) if speed is not None else 0
+    rain=float((weather or {}).get("rain_mm") or 0)
+    wind=float((weather or {}).get("wind_kmh") or 0)
+    visibility=float((weather or {}).get("visibility_m") or 10000)
+    weather_penalty=min(12, rain*0.8 + max(0, wind-35)*0.08 + max(0, 3000-visibility)/1000*1.5)
+    congestion=compute_congestion(delay, train.get("status"))
+    congestion_penalty=congestion["score"]*0.05
+    # Transparent prototype prediction layer; replace with trained model later.
+    predicted_extra=max(0, round(delay*0.35 + weather_penalty + congestion_penalty - max(0,speed-70)*0.03))
+    confidence=max(60,min(96,round(94 - weather_penalty*1.2 - congestion_penalty*0.5)))
+    return {"predicted_extra_delay":predicted_extra,"confidence":confidence,"weather_penalty_min":round(weather_penalty,1),"congestion_penalty_min":round(congestion_penalty,1),"model":"prototype predictive model"}
+
 def live_train_dict(data):
     train = data.get("train") or {}
     cur = data.get("currentLocation") or {}
@@ -188,7 +258,7 @@ def live_train_dict(data):
     else:
         segment_speed = None
     confidence = max(70, min(98, round(96 - min(delay,30)*0.55)))
-    return {
+    base = {
         "train_no": str(train.get("number") or data.get("trainNumber") or ""),
         "name": train.get("name") or "Unknown train",
         "origin": (train.get("source") or {}).get("name") if isinstance(train.get("source"), dict) else train.get("source", ""),
@@ -214,6 +284,19 @@ def live_train_dict(data):
         "live_fetched_at": datetime.now().isoformat(timespec="seconds"),
         "route": route,
     }
+    weather = None
+    weather_error = None
+    if lat is not None and lon is not None:
+        weather, weather_error = fetch_weather(lat, lon)
+    prediction = prediction_features(base, weather)
+    base["weather"] = weather
+    base["weather_error"] = weather_error
+    base["congestion"] = compute_congestion(base.get("delay"), base.get("status"), base.get("next_station"))
+    base["signal"] = {"status":"NOT SUPPLIED", "source":"RailRadar live feed does not provide railway signal aspect in this response"}
+    base["prediction"] = prediction
+    base["predicted_eta"] = eta_from_schedule(scheduled, delay + prediction["predicted_extra_delay"]) if scheduled else None
+    base["actual_provider_eta"] = next_eta
+    return base
 
 
 def get_live_train(train_no, force=False):
@@ -240,6 +323,7 @@ def config():
         "provider": "RailRadar" if live_enabled() else "Simulation",
         "live_trains": LIVE_NUMBERS if live_enabled() else [],
         "refresh_seconds": LIVE_CACHE_SECONDS if live_enabled() else 10,
+        "weather_cache_seconds": WEATHER_CACHE_SECONDS,
         "message": "Live railway feed connected" if live_enabled() else "Add RAILRADAR_API_KEY in Render to enable live data"
     })
 
@@ -339,6 +423,16 @@ def events(train_no):
                          "created":d.get("lastUpdatedAt") or datetime.now().isoformat(timespec="seconds")}])
     c=conn(); rows=c.execute("SELECT * FROM events WHERE train_no=? ORDER BY id DESC LIMIT 12",(train_no,)).fetchall(); c.close(); return jsonify([dict(r) for r in rows])
 
+
+@app.route("/api/trains/<train_no>/environment")
+def environment(train_no):
+    if not live_enabled():
+        return jsonify({"weather":None,"signal":{"status":"DEMO / NOT CONNECTED"},"congestion":{"level":"DEMO"}})
+    d, err = fetch_live(train_no)
+    if not d:
+        return jsonify({"error":err or "Live train unavailable"}),503
+    live = live_train_dict(d)
+    return jsonify({"weather":live.get("weather"),"weather_error":live.get("weather_error"),"signal":live.get("signal"),"congestion":live.get("congestion"),"prediction":live.get("prediction")})
 
 @app.route("/api/live/tick", methods=["POST"])
 def live_tick():

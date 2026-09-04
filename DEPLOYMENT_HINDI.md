@@ -1,17 +1,14 @@
-# RailETA Public Website — Deployment
+# RailETA — Live + Weather + ML deployment
 
-1. GitHub.com par login karo aur `rail-eta` naam ka repository banao.
-2. Is folder ki saari files upload karo.
-3. Render.com par login karo.
-4. New -> Web Service -> apni GitHub repository select karo.
-5. Build Command:
-   `pip install -r requirements.txt`
-6. Start Command:
-   `gunicorn app:app`
-7. Deploy karo.
-8. Deploy ke baad Render ek HTTPS public link dega, jaise:
-   `https://rail-eta.onrender.com`
+1. Keep `RAILRADAR_API_KEY` in Render Environment Variables.
+2. Keep `LIVE_TRAIN_NUMBERS` as your selected trains. Do not continuously poll 100 trains on the free API quota.
+3. Train the ML model in Colab using `RailETA_ML_Training.ipynb`.
+4. Copy `model/eta_delay_model.joblib` into the project before deploying if you want the trained historical delay-risk model loaded.
+5. Render runs the model for inference only.
 
-Is link ko kisi bhi mobile/laptop se open kiya ja sakta hai.
-
-Note: Current prototype simulated train data + SQLite use karta hai. Hosting restart/redeploy par SQLite changes reset ho sakte hain. Permanent data ke liye PostgreSQL recommended hai.
+## Important truth for the demo
+- RailRadar = live provider feed when API returns live data.
+- Open-Meteo = live weather; no key required.
+- Congestion = derived indicator, not railway track-occupancy telemetry.
+- Signal aspect = NOT SUPPLIED unless an authorized railway signalling feed is connected.
+- Kaggle competition data = synthetic/educational; use it to demonstrate the ML pipeline, not to claim official IR historical training.

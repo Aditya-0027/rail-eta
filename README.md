@@ -1,43 +1,21 @@
-# RailETA Dynamic — Indian Railways ETA Prototype
+# RailETA — Dynamic Live ETA + Weather + ML
 
-A full-stack prototype with a working Flask + SQLite backend and a responsive frontend.
+RailETA is a prototype for dynamic train ETA and delay-risk prediction.
 
-## Features
-- Train search by train number/name
-- Live-style train dashboard
-- Station-wise schedule + predicted ETA
-- Delay, speed, platform and status
-- Dynamic ETA calculation from current delay, section speed, congestion and historical section time
-- Simulated live movement endpoint
-- Delay event feed
-- REST APIs for apps, displays and control-room dashboards
-- SQLite database seeded with sample Indian Railways coaching trains
+## Current stack
+- Flask backend
+- RailRadar live train running API
+- Open-Meteo weather API (no key for non-commercial use)
+- Cached live requests
+- Optional trained historical delay-risk model
+- Browser dashboard
 
-## Run
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
-python app.py
-```
-Open http://127.0.0.1:5000
+## ML truth
+The included ML training pipeline uses the Kaggle **Indian Railways: Predict Train Delay** competition dataset. Kaggle describes 1.5M training journeys and a target `is_delayed` (>15 min late). The competition rules identify the data as synthetic/educational. Therefore the model is a **historical delay-risk demo**, not a model trained on official Indian Railways operational history. For a true exact-minute ETA model, collect authorized historical actual-vs-scheduled arrival records and train a regression/time-to-arrival model.
 
-## API
-- GET /api/trains
-- GET /api/trains/<train_no>
-- GET /api/trains/<train_no>/stations
-- GET /api/trains/<train_no>/events
-- POST /api/trains/<train_no>/simulate
-- GET /api/health
+## Free weather
+Open-Meteo provides a no-key weather API for non-commercial use. Cache weather calls to reduce load.
 
-The included data is simulated/demo data; connect an authorized live railway feed to replace the simulator.
+## Speed fallback update
 
-
-## Public deployment
-Upload this folder to GitHub, then create a Render Web Service from the repository.
-Build: `pip install -r requirements.txt`
-Start: `gunicorn app:app`
-The service will provide a public HTTPS URL.
-
-This prototype uses SQLite and simulated train data. For persistent production data, migrate to PostgreSQL and connect an authorized live railway feed.
+If RailRadar supplies `currentLocation.speedKmh`, RailETA uses it directly. If it is missing, RailETA now derives a live speed estimate from `segmentProgress` plus route distance and timing (actual departure when available, otherwise consecutive live snapshots). The UI marks this with `*` and does not confuse the provider's `speedToNextStationKmph` with current speed. At a genuine halt, current speed is 0 km/h.

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+rail_eta.db
+.env
+.DS_Store

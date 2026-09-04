@@ -23,6 +23,10 @@ _weather_cache = {}
 _weather_lock = threading.Lock()
 WEATHER_CACHE_SECONDS = int(os.getenv("WEATHER_CACHE_SECONDS", "900"))  # 15 min
 WEATHER_BASE = "https://api.open-meteo.com/v1/forecast"
+GEOCODE_BASE = "https://geocoding-api.open-meteo.com/v1/search"
+_station_geo_cache = {}
+_station_geo_lock = threading.Lock()
+STATION_GEO_CACHE_SECONDS = 86400  # 24h; station coordinates change very rarely
 
 SEED_TRAINS = [
     ("12951","Mumbai Rajdhani","Mumbai Central","New Delhi","Rajdhani Express","WR",8),
@@ -141,8 +145,40 @@ def fetch_live(train_no, force=False):
         return None, str(e)
 
 
+def geocode_station(station_name, force=False):
+    """Resolve a station name to approximate coordinates once, then cache for 24h."""
+    if not station_name or requests is None:
+        return None, "Station name unavailable"
+    name = str(station_name).strip()
+    if not name or name in ("—", "Not supplied"):
+        return None, "Station name unavailable"
+    key = name.lower()
+    now = datetime.now()
+    with _station_geo_lock:
+        cached = _station_geo_cache.get(key)
+        if cached and not force and (now - cached["fetched"]).total_seconds() < STATION_GEO_CACHE_SECONDS:
+            return cached["data"], None
+    try:
+        r = requests.get(GEOCODE_BASE, params={"name": name, "count": 5, "language": "en", "format": "json"}, timeout=8)
+        if r.status_code != 200:
+            return None, f"Geocoding HTTP {r.status_code}"
+        results = r.json().get("results") or []
+        # Prefer an India result. Open-Meteo geocoding may return a city with the same name.
+        chosen = next((x for x in results if str(x.get("country_code", "")).upper() == "IN"), results[0] if results else None)
+        if not chosen:
+            return None, "Station coordinates not found"
+        out = {"lat": chosen.get("latitude"), "lon": chosen.get("longitude"), "name": chosen.get("name") or name}
+        with _station_geo_lock:
+            _station_geo_cache[key] = {"fetched": now, "data": out}
+        return out, None
+    except Exception as e:
+        return None, str(e)
+
+
 def fetch_weather(lat, lon, force=False):
-    if lat is None or lon is None or requests is None:
+    if requests is None:
+        return None, "Weather client unavailable"
+    if lat is None or lon is None:
         return None, "Weather coordinates unavailable"
     try:
         latf, lonf = float(lat), float(lon)
@@ -286,11 +322,27 @@ def live_train_dict(data):
     }
     weather = None
     weather_error = None
+    weather_source = "train coordinates"
+    weather_station = None
     if lat is not None and lon is not None:
         weather, weather_error = fetch_weather(lat, lon)
+    # If the live provider does not supply GPS coordinates, use the next station
+    # as a location fallback. This keeps weather live without pretending the
+    # station coordinates are the train's exact position. Geocoding is cached 24h.
+    if weather is None:
+        fallback_station = nxt.get("stationName") or next_code or current_code
+        coords, geo_error = geocode_station(fallback_station)
+        if coords and coords.get("lat") is not None and coords.get("lon") is not None:
+            weather, weather_error = fetch_weather(coords["lat"], coords["lon"])
+            weather_source = "next-station coordinates"
+            weather_station = coords.get("name") or fallback_station
+        elif not weather_error:
+            weather_error = geo_error or "Weather coordinates unavailable"
     prediction = prediction_features(base, weather)
     base["weather"] = weather
     base["weather_error"] = weather_error
+    base["weather_source"] = weather_source
+    base["weather_station"] = weather_station
     base["congestion"] = compute_congestion(base.get("delay"), base.get("status"), base.get("next_station"))
     base["signal"] = {"status":"NOT SUPPLIED", "source":"RailRadar live feed does not provide railway signal aspect in this response"}
     base["prediction"] = prediction
